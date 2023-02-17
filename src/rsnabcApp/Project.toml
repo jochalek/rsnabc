@@ -1,5 +1,5 @@
 name = "rsnabcApp"
-uuid = "5471ebb9-ea5a-4e57-921f-da3b3055c31e"
+uuid = "282d5ae1-f8c5-427e-89b8-a8d7cdd59606"
 authors = ["justin <jochalek125@gmail.com>"]
 version = "0.1.0"
 
@@ -13,4 +13,5 @@ FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
 FilePathsBase = "48062228-2e41-5def-b9a4-89aafe57970f"
 ImageMagick = "6218d12a-5da1-5696-b52f-db25d2ecc6d1"
 Images = "916415d5-f1e6-5110-898d-aaa5f9f070e0"
+JpegTurbo_jll = "aacddb02-875f-59d6-b918-886e6ef4fbf8"
 MLUtils = "f1d291b0-491e-4a28-83b9-f70985020b54"
