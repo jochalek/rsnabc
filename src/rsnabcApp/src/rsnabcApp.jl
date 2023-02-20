@@ -2,10 +2,7 @@ module rsnabcApp
 
 import MLUtils
 
-using MLUtils: DataLoader
-# using MLUtils: filterobs
-# using FastVision: isimagefile
-# using FastAI.Datasets: loadfolderdata
+using MLUtils: DataLoader, BatchView
 using ArgParse
 using CSV
 using DataFrames
@@ -15,9 +12,12 @@ using FileIO
 using Images
 using FilePathsBase
 # using Metalhead
-
 # using DataAugmentation
 
+### Custom FastAI learning task
+# include("./tasks.jl")
+
+### Command line arguments
 function parse_commandline()
     s = ArgParseSettings()
     @add_arg_table! s begin
@@ -27,13 +27,16 @@ function parse_commandline()
         "--batchsize"
         help = "Number of test images to process per batch"
         arg_type = Int
-        default = 32
+        default = 1
         "--input_size"
         help = "Resize inputs to this. By default aspect ratio is not preserved."
         arg_type = Int
         default = 256
         "--preserve_aspect"
         help = "Aspect ratio must match model input size"
+        action = :store_true
+        "--presize"
+        help = "Presize images to disk before running the model."
         action = :store_true
         "--test_data", "-t"
         help = "The directory of the test data including test.csv and test_images/"
@@ -46,6 +49,19 @@ function parse_commandline()
     end
     return parse_args(s)
 end
+
+
+"""
+Loads file and scales it to the input size. Does not preserve aspect ratio
+"""
+function grabimage(filepath, args)
+    image = loadfile(filepath)
+    tfm = FastVision.DataAugmentation.ScaleFixed((args["input_size"], args["input_size"]))
+    image = FastVision.DataAugmentation.Image(image)
+    timage = FastVision.DataAugmentation.apply(tfm, image)
+    return FastVision.DataAugmentation.itemdata(timage)
+end
+
 
 function presizeimage(img, args)
     size = args["input_size"]
@@ -60,9 +76,7 @@ end
 function presizeimagedir(dstdir, args)
     srcdir = joinpath(args["test_data"], "test_images")
     # pathdata = filterobs(isimagefile, loadfolderdata(srcdir)) ## filterobs and pathparents are having a problem? Empty collection...
-    pathdata = loadfolderdata(
-        srcdir;
-        pattern="*/*")
+    pathdata = loadfolderdata(srcdir; pattern = "*/*")
 
 
     # create directories beforehand
@@ -81,19 +95,63 @@ function presizeimagedir(dstdir, args)
     end
 end
 
-
-function runmodel(input_dir, args)
+function runmodel(df::DataFrame, args)
     taskmodel = args["model"]
     task, model = loadtaskmodel(taskmodel)
     model = gpu(model)
     minibatch = args["batchsize"]
-    predictions = []
-    # arrayloader = DataLoader(inputs; batchsize=minibatch, shuffle=false)
-    arrayloader = loadfolderdata(input_dir, loadfn=loadfile; pattern="*/*")
-    # arrayloader = loadfolderdata(dir, filterfn=FastVision.isimagefile, loadfn=(loadfile, parentname))
-    for x in 1:length(arrayloader)
-        tmpred = FastAI.predict(task, model, getobs(arrayloader, x); device=gpu, context=Inference())
-        predictions = push!(predictions, tmpred...)
+    iterator = BatchView(df, batchsize = minibatch)
+    predictions = DataFrame()
+    for batch in iterator
+        _df = DataFrame()
+        paths = [
+            joinpath(
+                args["test_data"],
+                "test_images",
+                string(batch[row, :patient_id]),
+                string(batch[row, :image_id]) * ".dcm",
+            ) for row = 1:nrow(batch)
+        ]
+        _collatedobs = mapobs(paths) do paths
+            grabimage(paths, args)
+        end
+        collatedobs = collect(_collatedobs)
+        preds = predictbatch(task, model, collatedobs; device = gpu, context = Inference())
+        _df = hcat(_df, batch)
+        _df = hcat(_df, DataFrame("cancer" => preds))
+        predictions = vcat(predictions, _df)
+    end
+    return predictions
+end
+
+
+
+
+
+function runmodel(input_dir::String, df::DataFrame, args)
+    taskmodel = args["model"]
+    task, model = loadtaskmodel(taskmodel)
+    model = gpu(model)
+    minibatch = args["batchsize"]
+    iterator = BatchView(df, batchsize = minibatch)
+    predictions = DataFrame()
+    for batch in iterator
+        _df = DataFrame()
+        paths = [
+            joinpath(
+                input_dir,
+                string(batch[row, :patient_id]),
+                string(batch[row, :image_id]) * ".dcm.jpg",
+            ) for row = 1:nrow(batch)
+        ]
+        _collatedobs = mapobs(paths) do paths
+            grabimage(paths, args)
+        end
+        collatedobs = collect(_collatedobs)
+        preds = predictbatch(task, model, collatedobs; device = gpu, context = Inference())
+        _df = hcat(_df, batch)
+        _df = hcat(_df, DataFrame("cancer" => preds))
+        predictions = vcat(predictions, _df)
     end
     return predictions
 end
@@ -119,19 +177,20 @@ function generate_submission(df::DataFrame, args)
             df_pred = vcat(df_pred, df_row)
         end
     else
-        DSTDIR = Path(mktempdir())
-        presizeimagedir(DSTDIR, args)
-        # input = loadfolderdata(convert(String, DSTDIR); pattern="*/*")
-        preds = runmodel(convert(String, DSTDIR), args)
-        tmpdf = DataFrame("cancer" => preds)
-        df_pred = hcat(df, tmpdf)
+        if args["presize"]
+            DSTDIR = Path(mktempdir())
+            presizeimagedir(DSTDIR, args)
+            df_pred = runmodel(convert(String, DSTDIR), df, args)
+        else
+            df_pred = runmodel(df, args)
+        end
     end
     df_subm = filter_results(df_pred)
     return df_subm
 end
 
 function write_submission(df::DataFrame)
-    CSV.write("submission.csv", df; bufsize=2^23)
+    CSV.write("submission.csv", df; bufsize = 2^23)
 end
 
 function real_main()
