@@ -1,8 +1,8 @@
 # FIXME using DrWatson before activating the environment breaks my FileIO "hack" to load dicom
 # using DrWatson
 # @quickactivate "rsnabc"
-using rsnabc
 using DrWatson
+using rsnabc
 
 using ArgParse,
     CSV,
@@ -14,7 +14,8 @@ using ArgParse,
     Images,
     MLUtils,
     MLDatasets,
-    DataAugmentation
+    DataAugmentation,
+    Random
 using Wandb, Logging, Statistics, Metalhead
 import FastVision: Gray, N0f8, SVector
 
@@ -49,10 +50,10 @@ s = ArgParseSettings()
     default = 42
     "--backbone"
     arg_type = String
-    default = "resnet34"
+    default = "resnet18"
     "--dataset"
     arg_type = String
-    default = "community"
+    default = "pngs"
     "--prototype"
     action = :store_true
     "--nowandb"
@@ -65,7 +66,7 @@ Random.seed!(rng, args.rng)
 
 ## Dataset choice
 dataset = choosedata()
-traindir(argz...) = datadir(dataset[args.dataset][1]..., argz...)
+traindir(argz...) = datadir(dataset[args.dataset]..., argz...)
 modeldir(argz...) = datadir("models", argz...)
 
 ## Logging
@@ -80,7 +81,6 @@ lgbackend = WandbBackend(
         "batchsize" => args.batchsize,
         "epochs" => args.epochs,
         "prototype" => args.prototype,
-        "architecture" => "UNet",
         "backbone" => args.backbone,
         "dataset" => args.dataset,
     ),
@@ -94,29 +94,19 @@ labels = select(df, :cancer)[:, 1];
 # Images FIXME which way?
 # images = FileDataset(traindir(), "*/*");
 
-dir = datadir("exp_pro", "images_as_pngs", "train_images_processed");
-images =
-    FastAI.Datasets.loadfolderdata(dir, filterfn = rsnabc.isimagefile, loadfn = loadfile)
+images = loadfolderdata(traindir(), filterfn = rsnabc.isimagefile, loadfn = loadfile)
 
-dataset = (images, labels);
+alldata = (images, labels);
 
 ### FIXME use taskdataloaders or something to split this before balancing to avoid leakage
-# balanced_data = oversample(dataset, dataset[2]; fraction = 0.34, shuffle = true)
-# data = balanced_data
-
-blocks = (Image{2}(), Label([0, 1]))
-
-
-
-
-
+train, test = splitobs(alldata, at = 0.7, shuffle = true)
+balanced_train = oversample(train[1], train[2]; fraction = 0.34, shuffle = true)
 
 ### Task setup
-data = dataset
 task = BlockTask(
-    (Image{2}(), Label([0, 1])),
+    (FastVision.Image{2}(), Label([0, 1])),
     (
-        ProjectiveTransforms((256, 256)),
+        ProjectiveTransforms((args.imgsize, args.imgsize)),
         ImagePreprocessing(; means = RSNABC_MEANS, stds = RSNABC_STDS, C = Gray{N0f8}),
         OneHot(),
     ),
@@ -133,20 +123,28 @@ function fscore(yhat, y)
     return 1 - FastAI.Flux.dice_coeff_loss(yhat, y)
 end
 
-
 ### Train
 f1 = Metric(fscore, device = gpu)
 backbone = Metalhead.ResNet(18).layers[1:end-1]
-learner = tasklearner(task, data; callbacks = [ToGPU(), Metrics(accuracy, f1)])
-fitonecycle!(learner, 10, 0.001)
+lossfn = FastAI.Flux.logitcrossentropy
+learner = tasklearner(
+    task,
+    balanced_train;
+    lossfn = lossfn,
+    callbacks = [ToGPU(), Metrics(accuracy, f1)],
+)
+epochs = args.epochs
+lr = args.lr
+fitonecycle!(learner, epochs, lr)
+
+### Save the model
+savetaskmodel(modeldir(String(runfileid * ".jld2")), task, learner.model, force = true)
+
+
+
 
 ### Generic training implementation
-# task = ImageClassificationSingle(blocks, data; size=(256, 256), C = Gray{N0f8}, computestats = true)
+
 # backbone = Metalhead.ResNet(18).layers[1:end-1]
 # learner = tasklearner(task, data; callbacks=[ToGPU(), Metrics(accuracy)])
 # fitonecycle!(learner, 1, 0.001)
-
-### Save the model
-savetaskmodel(datadir("models", "initmodel.jld2"), task, learner.model, force = true)
-
-savetaskmodel(modeldir(String(runfileid * ".jld2")), task, learner.model, force = true)

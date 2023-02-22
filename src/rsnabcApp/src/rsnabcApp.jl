@@ -56,12 +56,14 @@ Loads file and scales it to the input size. Does not preserve aspect ratio
 """
 function grabimage(filepath, args)
     image = loadfile(filepath)
-    tfm = FastVision.DataAugmentation.ScaleFixed((args["input_size"], args["input_size"]))
+    tfm =
+        FastVision.DataAugmentation.ScaleFixed((args["input_size"], args["input_size"])) |>
+        FastVision.DataAugmentation.PinOrigin()
     image = FastVision.DataAugmentation.Image(image)
     timage = FastVision.DataAugmentation.apply(tfm, image)
     return FastVision.DataAugmentation.itemdata(timage)
 end
-
+grabimage(filepath::Vector{String}, args) = grabimage.(filepath, args)
 
 function presizeimage(img, args)
     size = args["input_size"]
@@ -112,11 +114,11 @@ function runmodel(df::DataFrame, args)
                 string(batch[row, :image_id]) * ".dcm",
             ) for row = 1:nrow(batch)
         ]
-        _collatedobs = mapobs(paths) do paths
+        _batchloader = mapobs(paths) do paths
             grabimage(paths, args)
         end
-        collatedobs = collect(_collatedobs)
-        preds = predictbatch(task, model, collatedobs; device = gpu, context = Inference())
+        batchloader = FastAI.MLUtils.eachobsparallel(_batchloader)
+        preds = predictbatch(task, model, batchloader; device = gpu, context = Inference())
         _df = hcat(_df, batch)
         _df = hcat(_df, DataFrame("cancer" => preds))
         predictions = vcat(predictions, _df)
@@ -144,11 +146,11 @@ function runmodel(input_dir::String, df::DataFrame, args)
                 string(batch[row, :image_id]) * ".dcm.jpg",
             ) for row = 1:nrow(batch)
         ]
-        _collatedobs = mapobs(paths) do paths
+        _batchloader = mapobs(paths) do paths
             grabimage(paths, args)
         end
-        collatedobs = collect(_collatedobs)
-        preds = predictbatch(task, model, collatedobs; device = gpu, context = Inference())
+        batchloader = FastAI.MLUtils.eachobsparallel(_batchloader)
+        preds = predictbatch(task, model, batchloader; device = gpu, context = Inference())
         _df = hcat(_df, batch)
         _df = hcat(_df, DataFrame("cancer" => preds))
         predictions = vcat(predictions, _df)

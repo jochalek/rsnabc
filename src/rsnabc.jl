@@ -4,6 +4,7 @@ using Dates: now
 using ArgParse,
     CSV,
     DataFrames,
+    FastAI,
     FastVision,
     FileIO,
     FilePathsBase,
@@ -14,14 +15,15 @@ using ArgParse,
     Wandb,
     Logging,
     Statistics,
-    Metalhead
+    Metalhead,
+    Random
 import ProgressMeter: Progress, next!
 import FastVision: Gray, N0f8, SVector
 
 include("utils.jl")
 
 const RE_IMAGEFILE = r".*\.(gif|jpe?g|tiff?|png|webp|bmp|dcm)$"i
-isimagefile(f) = matches(RE_IMAGEFILE, f)
+isimagefile(f) = FastAI.Datasets.matches(RE_IMAGEFILE, f)
 
 # color statistics for normalization
 const RSNABC_MEANS = SVector{1}(Float32[0.13926385])
