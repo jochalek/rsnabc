@@ -24,6 +24,9 @@ function parse_commandline()
         "--debug_csv"
         help = "Bypass predict and write a dummy submission.csv"
         action = :store_true
+        "--debug_images"
+        help = "Process and save images, bypass predict and write a dummy submission.csv"
+        action = :store_true
         "--batchsize"
         help = "Number of test images to process per batch"
         arg_type = Int
@@ -50,20 +53,22 @@ function parse_commandline()
     return parse_args(s)
 end
 
-
 """
 Loads file and scales it to the input size. Does not preserve aspect ratio
 """
-function grabimage(filepath, args)
+function grabimage(filepath::String, size)
     image = loadfile(filepath)
     tfm =
-        FastVision.DataAugmentation.ScaleFixed((args["input_size"], args["input_size"])) |>
+        FastVision.DataAugmentation.ScaleFixed((size, size)) |>
         FastVision.DataAugmentation.PinOrigin()
     image = FastVision.DataAugmentation.Image(image)
     timage = FastVision.DataAugmentation.apply(tfm, image)
     return FastVision.DataAugmentation.itemdata(timage)
 end
-grabimage(filepath::Vector{String}, args) = grabimage.(filepath, args)
+grabimage(filepath::Vector{String}, size) = grabimage.(filepath, size)
+
+#HACK to fix ERROR: MethodError: no method matching loadfile(::Vector{String})
+loadfile(file::Vector{String}) = FastAI.loadfile.(file)
 
 function presizeimage(img, args)
     size = args["input_size"]
@@ -93,66 +98,62 @@ function presizeimagedir(dstdir, args)
 
         img = loadfile(srcp)
         img_presized = presizeimage(img, args)
-        save(string(dstp) * ".jpg", img_presized) #why not png?
+        save(string(dstp)[1:end-4] * ".jpg", img_presized) #why not png?
     end
 end
 
 function runmodel(df::DataFrame, args)
+    resized_image = args["input_size"]
     taskmodel = args["model"]
     task, model = loadtaskmodel(taskmodel)
     model = gpu(model)
     minibatch = args["batchsize"]
-    iterator = BatchView(df, batchsize = minibatch)
     predictions = DataFrame()
-    for batch in iterator
-        _df = DataFrame()
-        paths = [
-            joinpath(
-                args["test_data"],
-                "test_images",
-                string(batch[row, :patient_id]),
-                string(batch[row, :image_id]) * ".dcm",
-            ) for row = 1:nrow(batch)
-        ]
-        _batchloader = mapobs(paths) do paths
-            grabimage(paths, args)
-        end
-        batchloader = FastAI.MLUtils.eachobsparallel(_batchloader)
-        preds = predictbatch(task, model, batchloader; device = gpu, context = Inference())
-        _df = hcat(_df, batch)
-        _df = hcat(_df, DataFrame("cancer" => preds))
+    paths = [
+        joinpath(
+            args["test_data"],
+            "test_images",
+            string(df[row, :patient_id]),
+            string(df[row, :image_id]) * ".dcm",
+        ) for row = 1:nrow(df)
+    ]
+    ids = [string(df[row, :prediction_id]) for row = 1:nrow(df)]
+    _batchloader = mapobs(paths) do paths
+        grabimage(paths, resized_image)
+    end
+    batchloader = DataLoader((_batchloader, ids); batchsize = minibatch, parallel = true)
+    for batch in batchloader
+        imgs, pids = batch
+        # _df = DataFrame()
+        preds = predictbatch(task, model, imgs; device = gpu, context = Inference())
+        _df = DataFrame("prediction_id" => pids, "cancer" => preds)
+        # _df = hcat(_df, batch)
+        # _df = hcat(_df, DataFrame("cancer" => preds))
         predictions = vcat(predictions, _df)
     end
     return predictions
 end
 
-
-
-
-
 function runmodel(input_dir::String, df::DataFrame, args)
+    resized_image = args["input_size"]
     taskmodel = args["model"]
     task, model = loadtaskmodel(taskmodel)
     model = gpu(model)
     minibatch = args["batchsize"]
-    iterator = BatchView(df, batchsize = minibatch)
-    predictions = DataFrame()
-    for batch in iterator
-        _df = DataFrame()
-        paths = [
-            joinpath(
-                input_dir,
-                string(batch[row, :patient_id]),
-                string(batch[row, :image_id]) * ".dcm.jpg",
-            ) for row = 1:nrow(batch)
-        ]
-        _batchloader = mapobs(paths) do paths
-            grabimage(paths, args)
-        end
-        batchloader = FastAI.MLUtils.eachobsparallel(_batchloader)
-        preds = predictbatch(task, model, batchloader; device = gpu, context = Inference())
-        _df = hcat(_df, batch)
-        _df = hcat(_df, DataFrame("cancer" => preds))
+    predictions = DataFrame() #FIXME need to carry :prediction_id from og DataFrame into pipeline to id preds.
+    paths = [
+        joinpath(
+            input_dir,
+            string(df[row, :patient_id]) * "_" * string(df[row, :image_id]) * ".png",
+        ) for row = 1:nrow(df)
+    ]
+    ids = [string(df[row, :prediction_id]) for row = 1:nrow(df)]
+    _batchloader = mapobs(loadfile, paths)
+    batchloader = DataLoader((_batchloader, ids); batchsize = minibatch, parallel = true)
+    for batch in batchloader
+        imgs, pids = batch
+        preds = predictbatch(task, model, imgs; device = gpu, context = Inference())
+        _df = DataFrame("prediction_id" => pids, "cancer" => preds)
         predictions = vcat(predictions, _df)
     end
     return predictions
@@ -178,11 +179,22 @@ function generate_submission(df::DataFrame, args)
                 DataFrame("prediction_id" => df[row, :prediction_id], "cancer" => rand(1))
             df_pred = vcat(df_pred, df_row)
         end
+    elseif args["debug_images"]
+        DSTDIR = Path(mktempdir())
+        presizeimagedir(DSTDIR, args)
+        df_pred = DataFrame()
+        for row = 1:nrow(df)
+            df_row =
+                DataFrame("prediction_id" => df[row, :prediction_id], "cancer" => rand(1))
+            df_pred = vcat(df_pred, df_row)
+        end
     else
         if args["presize"]
-            DSTDIR = Path(mktempdir())
-            presizeimagedir(DSTDIR, args)
-            df_pred = runmodel(convert(String, DSTDIR), df, args)
+            # DSTDIR = Path(mktempdir())
+            # presizeimagedir(DSTDIR, args)
+            # df_pred = runmodel(convert(String, DSTDIR), df, args)
+            DSTDIR = "/tmp/output"
+            df_pred = runmodel(DSTDIR, df, args)
         else
             df_pred = runmodel(df, args)
         end
